@@ -1,0 +1,405 @@
+<!DOCTYPE html>
+<html lang="km">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin - កម្មវិធី​សុំ​ច្បាប់</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Google Font: Khmer -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Kantumruy+Pro:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- Font Awesome (for icons) -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" xintegrity="sha512-9usAa10IRO0HhonpyAIVpjrylPvoDwiPUiKdWk5t3PyolY1cOd4DSE0Ga+ri4AuTroPR5aQvXU9xC6qOPnzFeg==" crossorigin="anonymous" referrerpolicy="no-referrer" />
+
+    <!-- Firebase SDK (Keep existing script block) -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import {
+            getFirestore, doc, updateDoc, collection, query, where, onSnapshot, serverTimestamp, Timestamp, setLogLevel,
+            // orderBy // <<< Removed orderBy import as we won't use it in queries causing index issues
+        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+        // Enable Firestore debug logging
+        setLogLevel('debug');
+
+        // --- Use THE SAME Firebase Config as the user app ---
+        const firebaseConfig = {
+            apiKey: "AIzaSyDjr_Ha2RxOWEumjEeSdluIW3JmyM76mVk",
+            authDomain: "dipermisstion.firebaseapp.com",
+            projectId: "dipermisstion",
+            storageBucket: "dipermisstion.firebasestorage.app", // Check spelling if needed
+            messagingSenderId: "512999406057",
+            appId: "1:512999406057:web:953a281ab9dde7a9a0f378",
+            measurementId: "G-KDPHXZ7H4B"
+        };
+        // --- End of Config ---
+
+        // --- Global State & Element References ---
+        let db, auth;
+        let requestsUnsubscribe = null; // Single listener for both types
+        const ADMIN_NAME = "Admin Daro"; // Hardcoded admin name for now
+
+        // --- Firestore Collection Path (MUST MATCH USER APP) ---
+        let leaveRequestsCollectionPath;
+        let outRequestsCollectionPath;
+
+        // --- Element References ---
+        let requestListContainer, loadingIndicator, emptyPlaceholder, errorDisplay, filterSelect;
+
+        // --- Helper: Format Timestamp ---
+        function formatFirestoreTimestamp(timestamp, format = 'HH:mm dd/MM/yyyy') {
+             let date;
+             if (!timestamp) return "";
+             if (timestamp instanceof Date) date = timestamp;
+             else if (timestamp.toDate) date = timestamp.toDate();
+             else if (typeof timestamp === 'string') { date = new Date(timestamp); if (isNaN(date.getTime())) return ""; }
+             else if (timestamp.seconds) date = new Date(timestamp.seconds * 1000);
+             else return "";
+             const hours = String(date.getHours()).padStart(2, '0');
+             const minutes = String(date.getMinutes()).padStart(2, '0');
+             const day = String(date.getDate()).padStart(2, '0');
+             const month = String(date.getMonth() + 1).padStart(2, '0');
+             const year = date.getFullYear();
+             if (format === 'HH:mm' || format === 'time') return `${hours}:${minutes}`;
+             if (format === 'dd/MM/yyyy' || format === 'date') return `${day}/${month}/${year}`;
+             return `${hours}:${minutes} ${day}/${month}/${year}`;
+        }
+
+        // --- App Initialization ---
+        document.addEventListener('DOMContentLoaded', async () => {
+
+            // --- Assign Element References ---
+            requestListContainer = document.getElementById('request-list');
+            loadingIndicator = document.getElementById('loading-indicator');
+            emptyPlaceholder = document.getElementById('empty-placeholder');
+            errorDisplay = document.getElementById('error-display');
+            filterSelect = document.getElementById('status-filter');
+
+            // --- Initialize Firebase ---
+            try {
+                if (!firebaseConfig.projectId) throw new Error("projectId not provided in firebase.initializeApp.");
+                const app = initializeApp(firebaseConfig);
+                db = getFirestore(app);
+                auth = getAuth(app);
+
+                const canvasAppId = typeof __app_id !== 'undefined' ? __app_id : 'default-app-id';
+                leaveRequestsCollectionPath = `/artifacts/${canvasAppId}/public/data/leave_requests`;
+                outRequestsCollectionPath = `/artifacts/${canvasAppId}/public/data/out_requests`;
+                console.log("Admin App Using Firestore Leave Path:", leaveRequestsCollectionPath);
+                console.log("Admin App Using Firestore Out Path:", outRequestsCollectionPath);
+
+                // --- Firebase Authentication (Anonymous for simplicity) ---
+                 onAuthStateChanged(auth, (user) => {
+                     if (user) {
+                         console.log("Admin App: Signed in anonymously. UID:", user.uid);
+                         setupRequestListener(filterSelect.value);
+                     } else {
+                         console.log("Admin App: No user. Attempting anonymous sign-in...");
+                         signInAnonymously(auth).catch(anonError => {
+                             console.error("Admin App: Anonymous Sign-In Error:", anonError);
+                             showError(`Critical Error: មិនអាច Sign In បានទេ។ ${anonError.message}។`);
+                         });
+                     }
+                 });
+                 await signInAnonymously(auth);
+
+            } catch (e) {
+                console.error("Firebase Initialization/Auth Error:", e);
+                showError(`Critical Error: មិនអាច​តភ្ជាប់ Firebase បាន​ទេ។ ${e.message}។ សូម Refresh ម្ដងទៀត។`);
+            }
+
+            // --- Filter Change Listener ---
+            if (filterSelect) {
+                filterSelect.addEventListener('change', (event) => {
+                    setupRequestListener(event.target.value);
+                });
+            }
+
+            // --- Event Listener for Approve/Reject Buttons ---
+            if (requestListContainer) {
+                requestListContainer.addEventListener('click', handleAdminAction);
+            }
+
+        }); // End DOMContentLoaded
+
+        // --- Show Error Message ---
+        function showError(message) {
+            if (errorDisplay) { errorDisplay.textContent = message; errorDisplay.classList.remove('hidden'); }
+            if (loadingIndicator) loadingIndicator.classList.add('hidden');
+            if (requestListContainer) requestListContainer.innerHTML = '';
+            if (emptyPlaceholder) emptyPlaceholder.classList.add('hidden');
+        }
+
+        // --- Setup Firestore Listener ---
+        function setupRequestListener(statusFilter = 'pending') {
+            console.log(`Setting up listener for status: ${statusFilter}`);
+            if (requestsUnsubscribe) { console.log("Unsubscribing previous listener."); requestsUnsubscribe(); }
+            if (!db) { showError("Firestore is not initialized."); return; }
+
+            if (loadingIndicator) loadingIndicator.classList.remove('hidden');
+            if (emptyPlaceholder) emptyPlaceholder.classList.add('hidden');
+            if (errorDisplay) errorDisplay.classList.add('hidden');
+            if (requestListContainer) requestListContainer.innerHTML = '';
+
+            const collectionsToQuery = [leaveRequestsCollectionPath, outRequestsCollectionPath];
+            let allRequests = [];
+            let initialLoadsPending = collectionsToQuery.length;
+            requestsUnsubscribe = () => { listeners.forEach(unsub => unsub()); };
+            const listeners = [];
+
+            collectionsToQuery.forEach(collectionPath => {
+                let q;
+                const baseCollectionRef = collection(db, collectionPath);
+                if (statusFilter === 'all') q = query(baseCollectionRef);
+                else if (statusFilter === 'pending') q = query(baseCollectionRef, where('status', 'in', ['pending', 'editing']));
+                else q = query(baseCollectionRef, where('status', '==', statusFilter));
+
+                const unsubscribe = onSnapshot(q, (snapshot) => {
+                    console.log(`Snapshot received for ${collectionPath.split('/').pop()}, Status: ${statusFilter}, Size: ${snapshot.size}`);
+                    const type = collectionPath.includes('leave_requests') ? 'leave' : 'out';
+                    const currentDocs = [];
+                    snapshot.forEach(doc => { currentDocs.push({ ...doc.data(), id: doc.id, type: type }); });
+                    allRequests = allRequests.filter(req => req.type !== type).concat(currentDocs);
+                    sortAndRenderRequests(allRequests, statusFilter);
+                    if (initialLoadsPending > 0) {
+                        initialLoadsPending--;
+                        if (initialLoadsPending === 0) {
+                             if (loadingIndicator) loadingIndicator.classList.add('hidden');
+                             if(allRequests.length === 0 && emptyPlaceholder) emptyPlaceholder.classList.remove('hidden');
+                        }
+                    }
+                }, (error) => {
+                    console.error(`Error listening to ${collectionPath}:`, error);
+                    if (error.code === 'failed-precondition' && error.message.includes('index')) showError(`Error: Firestore index required for this query on ${collectionPath.split('/').pop()}. Please check console for link to create index, or simplify query.`);
+                    else showError(`Error loading ${collectionPath.split('/').pop()}: ${error.message}. Check Firestore Rules.`);
+                    if (initialLoadsPending > 0) { initialLoadsPending--; if (initialLoadsPending === 0 && loadingIndicator) loadingIndicator.classList.add('hidden'); }
+                });
+                listeners.push(unsubscribe);
+            });
+        }
+
+        // --- Sort and Render Combined Requests ---
+         function sortAndRenderRequests(requests, currentFilter) {
+             requests.sort((a, b) => {
+                 const statusPriority = { 'pending': 1, 'editing': 2, 'approved': 3, 'rejected': 4 };
+                 const priorityA = statusPriority[a.status] || 5;
+                 const priorityB = statusPriority[b.status] || 5;
+                 if (currentFilter !== 'approved' && currentFilter !== 'rejected' && priorityA !== priorityB) return priorityA - priorityB;
+                 const timeA = a.requestedAt?.toMillis() ?? 0;
+                 const timeB = b.requestedAt?.toMillis() ?? 0;
+                 return (currentFilter === 'pending') ? timeA - timeB : timeB - timeA;
+             });
+             renderRequestList(requests);
+         }
+
+        // --- Render Request List ---
+        function renderRequestList(requests) {
+            if (!requestListContainer || !loadingIndicator || !emptyPlaceholder) return;
+            if (requests.length === 0) {
+                 if (loadingIndicator && loadingIndicator.classList.contains('hidden') && emptyPlaceholder) emptyPlaceholder.classList.remove('hidden');
+                requestListContainer.innerHTML = '';
+            } else {
+                if(emptyPlaceholder) emptyPlaceholder.classList.add('hidden');
+                requestListContainer.innerHTML = requests.map(req => renderRequestCard(req)).join('');
+            }
+        }
+
+        // --- Render Single Request Card ---
+        // <<< កែប្រែ Styling នៅក្នុង Function នេះ
+        function renderRequestCard(request) {
+            if (!request || !request.id) return '';
+
+            const typeText = request.type === 'leave' ? 'ច្បាប់ឈប់សម្រាក' : 'ច្បាប់ចេញក្រៅ';
+            const typeColor = request.type === 'leave' ? 'bg-blue-100 text-blue-800' : 'bg-green-100 text-green-800';
+            const dateString = (request.startDate === request.endDate) ? request.startDate : `${request.startDate} ដល់ ${request.endDate}`;
+            const requestedAtFormatted = formatFirestoreTimestamp(request.requestedAt, 'HH:mm dd/MM/yyyy');
+
+            let statusBadge = '';
+            let actionButtons = '';
+            let statusText = request.status || 'N/A';
+            let statusBgColor = 'bg-gray-100';
+            let statusTextColor = 'text-gray-800';
+
+            switch (request.status) {
+                case 'pending':
+                case 'editing':
+                    statusText = request.status === 'editing' ? 'កំពុងកែ' : 'រង់ចាំ';
+                    statusBgColor = 'bg-yellow-100'; statusTextColor = 'text-yellow-800';
+                    actionButtons = `
+                        <div class="flex flex-col sm:flex-row gap-2 mt-4 pt-3 border-t border-gray-100">
+                            <button data-id="${request.id}" data-type="${request.type}" data-action="approve" class="flex-1 action-btn bg-green-500 hover:bg-green-600 text-white text-sm font-semibold py-2 px-4 rounded-lg shadow-sm transition duration-150 ease-in-out flex items-center justify-center gap-1.5">
+                                <i class="fas fa-check fa-fw"></i> អនុម័ត
+                            </button>
+                            <button data-id="${request.id}" data-type="${request.type}" data-action="reject" class="flex-1 action-btn bg-red-500 hover:bg-red-600 text-white text-sm font-semibold py-2 px-4 rounded-lg shadow-sm transition duration-150 ease-in-out flex items-center justify-center gap-1.5">
+                                <i class="fas fa-times fa-fw"></i> បដិសេធ
+                            </button>
+                        </div>`;
+                    break;
+                case 'approved':
+                    statusText = 'បានយល់ព្រម'; statusBgColor = 'bg-green-100'; statusTextColor = 'text-green-800';
+                    break;
+                case 'rejected':
+                    statusText = 'បានបដិសេធ'; statusBgColor = 'bg-red-100'; statusTextColor = 'text-red-800';
+                    break;
+            }
+            statusBadge = `<span class="text-xs font-bold px-2.5 py-1 rounded-full ${statusBgColor} ${statusTextColor}">${statusText}</span>`;
+
+            let decisionInfo = '';
+            if (request.status === 'approved' || request.status === 'rejected') {
+                decisionInfo = `<div class="text-xs text-gray-500 mt-2"><i class="fas fa-user-shield fa-fw mr-1"></i> ${request.decisionBy || 'N/A'} | <i class="far fa-clock fa-fw mr-1"></i> ${formatFirestoreTimestamp(request.decisionAt)}</div>`;
+            }
+
+             let returnInfo = '';
+             if (request.type === 'out' && request.returnStatus === 'បានចូលមកវិញ') {
+                 returnInfo = `<div class="text-xs text-green-700 font-medium mt-1.5"><i class="fas fa-door-open fa-fw mr-1"></i> បានចូលវិញ: ${request.returnedAt || ''}</div>`;
+             }
+
+
+            return `
+                <div class="bg-white border border-gray-200 rounded-lg shadow-md p-4 mb-4 break-inside-avoid hover:shadow-lg transition-shadow duration-200">
+                    <div class="flex justify-between items-center mb-3 pb-2 border-b border-gray-100">
+                        <span class="text-xs font-semibold px-2 py-0.5 rounded ${typeColor}">${typeText}</span>
+                        ${statusBadge}
+                    </div>
+                    <div class="mb-3">
+                        <p class="font-semibold text-lg text-gray-800">${request.name || 'N/A'} <span class="text-sm font-normal text-gray-500">(${request.userId || 'N/A'})</span></p>
+                        <p class="text-sm text-gray-600">${request.department || 'N/A'}</p>
+                    </div>
+                    <div class="text-sm space-y-1.5 mb-3">
+                        <div class="flex"><strong class="font-medium text-gray-500 w-20 inline-block shrink-0"><i class="far fa-calendar-alt fa-fw mr-1.5 text-blue-500"></i>កាលបរិច្ឆេទ:</strong> <span class="text-gray-700">${dateString}</span></div>
+                        <div class="flex"><strong class="font-medium text-gray-500 w-20 inline-block shrink-0"><i class="far fa-clock fa-fw mr-1.5 text-blue-500"></i>រយៈពេល:</strong> <span class="text-gray-700">${request.duration || 'N/A'}</span></div>
+                        <div class="flex"><strong class="font-medium text-gray-500 w-20 inline-block shrink-0 align-top"><i class="fas fa-info-circle fa-fw mr-1.5 text-blue-500"></i>មូលហេតុ:</strong> <span class="whitespace-pre-line inline-block text-gray-700">${request.reason || 'N/A'}</span></div>
+                         <div class="flex"><strong class="font-medium text-gray-500 w-20 inline-block shrink-0"><i class="far fa-paper-plane fa-fw mr-1.5 text-blue-500"></i>សុំនៅ:</strong> <span class="text-gray-700 text-xs">${requestedAtFormatted}</span></div>
+                    </div>
+                    ${decisionInfo}
+                    ${returnInfo}
+                    ${actionButtons}
+                </div>`;
+        }
+
+        // --- Handle Admin Action (Approve/Reject) ---
+        async function handleAdminAction(event) {
+            const button = event.target.closest('.action-btn');
+            if (!button) return;
+
+            const requestId = button.dataset.id;
+            const requestType = button.dataset.type;
+            const action = button.dataset.action;
+
+            if (!requestId || !requestType || !action) { console.error("Missing data attributes on action button."); return; }
+
+            console.log(`Action: ${action}, Type: ${requestType}, ID: ${requestId}`);
+            button.disabled = true; button.innerHTML = `<i class="fas fa-spinner fa-spin mr-1"></i> កំពុងដំណើរការ...`;
+
+            const collectionPath = requestType === 'leave' ? leaveRequestsCollectionPath : outRequestsCollectionPath;
+            const docRef = doc(db, collectionPath, requestId);
+
+            const updateData = { status: action === 'approve' ? 'approved' : 'rejected', decisionAt: serverTimestamp(), decisionBy: ADMIN_NAME };
+
+            try {
+                await updateDoc(docRef, updateData);
+                console.log(`Request ${requestId} successfully ${action}d.`);
+                showCustomAlert("ជោគជ័យ!", `សំណើ (${requestId}) ត្រូវបាន ${action === 'approve' ? 'អនុម័ត' : 'បដិសេធ'} ដោយជោគជ័យ។`, "success");
+            } catch (error) {
+                console.error(`Error ${action}ing request ${requestId}:`, error);
+                showCustomAlert("Error", `មានបញ្ហា ${action === 'approve' ? 'អនុម័ត' : 'បដិសេធ'} សំណើ: ${error.message}`);
+                 button.disabled = false; button.innerHTML = action === 'approve' ? `<i class="fas fa-check fa-fw"></i> អនុម័ត` : `<i class="fas fa-times fa-fw"></i> បដិសេធ`;
+            }
+        }
+
+        // --- Custom Alert Modal Logic ---
+        function showCustomAlert(title, message, type = 'warning') { if (!customAlertModal) return; if (customAlertTitle) customAlertTitle.textContent = title; if (customAlertMessage) customAlertMessage.textContent = message; if (type === 'success') { if (customAlertIconSuccess) customAlertIconSuccess.classList.remove('hidden'); if (customAlertIconWarning) customAlertIconWarning.classList.add('hidden'); } else { if (customAlertIconSuccess) customAlertIconSuccess.classList.add('hidden'); if (customAlertIconWarning) customAlertIconWarning.classList.remove('hidden'); } customAlertModal.classList.remove('hidden'); }
+        function hideCustomAlert() { if (customAlertModal) customAlertModal.classList.add('hidden'); }
+
+    </script>
+
+    <style>
+        body { font-family: 'Kantumruy Pro', sans-serif; -webkit-tap-highlight-color: transparent; }
+        .spinner { border: 4px solid rgba(0, 0, 0, 0.1); width: 24px; height: 24px; border-radius: 50%; border-left-color: #3b82f6; /* blue-500 */ animation: spin 1s ease infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        .break-inside-avoid { break-inside: avoid; page-break-inside: avoid; }
+        /* Style the select arrow */
+        select {
+          -webkit-appearance: none;
+          -moz-appearance: none;
+          appearance: none;
+          background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' fill='none' viewBox='0 0 20 20'%3E%3Cpath stroke='%236b7280' stroke-linecap='round' stroke-linejoin='round' stroke-width='1.5' d='M6 8l4 4 4-4'/%3E%3C/svg%3E");
+          background-position: right 0.5rem center;
+          background-repeat: no-repeat;
+          background-size: 1.5em 1.5em;
+          padding-right: 2.5rem; /* Make space for the arrow */
+        }
+    </style>
+</head>
+<body class="bg-gray-50"> <!-- Changed body background -->
+
+    <div class="max-w-md mx-auto min-h-screen bg-white shadow-lg flex flex-col">
+
+        <!-- Header -->
+        <header class="bg-blue-600 text-white p-4 shadow-md sticky top-0 z-10">
+            <h1 class="text-xl font-bold text-center">Admin - គ្រប់គ្រង​សំណើ</h1>
+        </header>
+
+        <!-- Filter Section -->
+        <div class="p-4 border-b border-gray-200 bg-white"> <!-- Changed background to white -->
+            <label for="status-filter" class="block text-sm font-medium text-gray-700 mb-1.5">ត្រង​តាម​ស្ថានភាព:</label>
+            <!-- Added shadow and slightly larger text -->
+            <select id="status-filter" class="w-full p-2.5 border border-gray-300 rounded-lg shadow-sm focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500 text-sm bg-white">
+                <option value="pending" selected>⏳ រង់ចាំ & កំពុងកែ</option>
+                <option value="approved">✅ បានយល់ព្រម</option>
+                <option value="rejected">❌ បានបដិសេធ</option>
+                <option value="all">⚪ ទាំងអស់</option>
+            </select>
+        </div>
+
+        <!-- Main Content Area (Scrollable Request List) -->
+        <main class="flex-grow overflow-y-auto p-4 bg-gray-50"> <!-- Added bg-gray-50 -->
+            <!-- Loading Indicator -->
+            <div id="loading-indicator" class="text-center py-16"> <!-- Increased padding -->
+                <div class="spinner inline-block w-8 h-8"></div> <!-- Made spinner larger -->
+                <p class="text-gray-500 mt-3 text-sm">កំពុង​ទាញ​យក​សំណើ...</p>
+            </div>
+
+            <!-- Error Display -->
+            <div id="error-display" class="hidden bg-red-100 border border-red-300 text-red-800 p-4 rounded-lg text-sm mx-2 my-4">
+                <!-- Error message here -->
+            </div>
+
+            <!-- Empty Placeholder -->
+            <div id="empty-placeholder" class="hidden text-center py-16"> <!-- Increased padding -->
+                <svg xmlns="http://www.w3.org/2000/svg" class="h-16 w-16 mx-auto text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="1">
+                    <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 14.25v-2.625a3.375 3.375 0 00-3.375-3.375h-1.5A1.125 1.125 0 0113.5 7.125v-1.5a3.375 3.375 0 00-3.375-3.375H8.25m0 12.75h7.5m-7.5 3H12M10.5 2.25H5.625c-.621 0-1.125.504-1.125 1.125v17.25c0 .621.504 1.125 1.125 1.125h12.75c.621 0 1.125-.504 1.125-1.125V11.25a9 9 0 00-9-9z" />
+                </svg>
+                <p class="mt-4 text-lg font-semibold text-gray-600">មិន​មាន​សំណើ​សម្រាប់​បង្ហាញ</p>
+                <p class="text-sm text-gray-400 mt-1">នៅ​ពេល​មាន​សំណើ​ថ្មី វា​នឹង​បង្ហាញ​នៅ​ទីនេះ។</p>
+            </div>
+
+            <!-- Request List Container -->
+            <!-- Added padding bottom to prevent items being hidden by footer/nav -->
+            <div id="request-list" class="space-y-4 pb-4">
+                <!-- Request cards will be injected here by JavaScript -->
+            </div>
+        </main>
+
+        <!-- Optional Footer -->
+        <!-- <footer class="p-2 text-center text-xs text-gray-400 border-t border-gray-200 bg-white"> Admin Panel &copy; 2025 </footer> -->
+
+    </div> <!-- End max-w-md -->
+
+     <!-- Custom Alert Modal -->
+    <div id="custom-alert-modal" class="fixed inset-0 z-[60] flex items-center justify-center bg-black bg-opacity-50 hidden p-4">
+        <div class="bg-white p-6 rounded-lg shadow-xl w-full max-w-sm text-center">
+            <svg id="custom-alert-icon-warning" xmlns="http://www.w3.org/2000/svg" class="h-12 w-12 mx-auto text-red-500 hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"> <path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" /> </svg>
+            <svg id="custom-alert-icon-success" xmlns="http://www.w3.org/2000/svg" class="h-12 w-12 mx-auto text-green-500 hidden" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"> <path stroke-linecap="round" stroke-linejoin="round" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" /> </svg>
+            <h3 id="custom-alert-title" class="text-xl font-bold mt-4 mb-2 text-gray-800">...</h3>
+            <p id="custom-alert-message" class="text-gray-600 mb-6 whitespace-pre-line text-sm">...</p>
+            <div class="flex justify-center"> <button id="custom-alert-ok-btn" class="bg-blue-600 text-white py-2 px-8 rounded-lg font-semibold shadow-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2"> យល់ព្រម </button> </div>
+        </div>
+    </div>
+
+</body>
+</html>
+
